@@ -1,0 +1,14 @@
+# Large data files
+data_norm.tsv
+BRCA_exp_matrix.tsv
+clinical_info_TCGA-BRCA.tsv
+nationwidechildrens.org_clinical_patient_brca.txt
+p_values.tsv
+
+# R temporary files
+.Rhistory
+.RData
+last_image.RData
+
+# PDFs (if not needed in repo)
+*.pdf

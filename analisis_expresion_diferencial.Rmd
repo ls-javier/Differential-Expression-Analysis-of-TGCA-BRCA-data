@@ -1,0 +1,850 @@
+---
+title: "Actividad. Análisis de expresión diferencial funcional"
+author: "Javier Luque Serrano"
+date: "2026-02-06"
+output:
+  word_document:
+    toc: true
+  html_document:
+    toc: true
+    df_print: paged
+  pdf_document:
+    toc: true
+    number_sections: true
+    fig_caption: true
+    keep_tex: true
+fontsize: 12pt
+geometry: margin=1in
+---
+
+En esta actividad se llevará a cabo un análisis de expresión diferencial funcional sobre el conjunto de datos de cáncer de mama BRCA, recogido por el proyecto TCGA (The Cancer Genome Atlas). Es decir, vamos a tratar de entender la diferencia en la expresión de determinados genes en una muestra de tejido sano respecto a tejido tumoral, de manera que se puedan clasificar bien los genes que afectan más a la proliferación del cáncer.
+
+# Preprocesado de los datos
+
+## Cargar las librerías
+
+Antes de empezar, se van a cargar las librerías que se necesitan para hacer el análisis.
+
+```{r}
+# Normalización de la matriz de expresion (incluido en limma)
+library(edgeR)
+# Analisis de expresion diferencial
+library(limma)
+# Descargar los datos de TCGA
+#library(TCGAbiolinks)
+#library(SummarizedExperiment)
+# Hacer gráficas
+library(ggplot2)
+# Complementario a ggplot2: graficas mas detalladas
+library(ggrepel)
+# Heatmap
+library(pheatmap)
+# Similitud semántica
+library(GOSemSim)
+# Base de datos
+library(org.Hs.eg.db)
+# Libreria Disease Ontology
+library(DOSE)
+# Enriquecimiento funcional
+library(clusterProfiler)
+# Manejo de dataframes
+library(dplyr)
+# Vias metabolicas en KEGG
+library(AnnotationDbi)
+# Compilar RMarkDown como PDF
+library(knitr)
+library(tinytex)
+```
+
+## Obtención del dataset
+
+### Ideal
+
+En esta sección vamos a acceder a la base de datos GDC (Genomics Data Commons) para descargar los datos TCGA-BRCA.
+
+```{r}
+# Ver la lista de proyectos que hay en GDC
+#gdcprojects <- getGDCprojects() # Lista de proyectos disponibles
+#getProjectSummary('TCGA-BRCA') # Resumen del proyecto TCGA-BRCA
+
+# Construimos una query con la información que queremos del proyecto
+#query_TCGA <- GDCquery(
+#  project = "TCGA-BRCA",
+#  data.category = "Transcriptome Profiling",
+#  data.type = "Gene Expression Quantification", 
+#  workflow.type = "STAR - Counts" # Datos crudos de la expresión de los genes en cada muestra
+#)
+
+# Ver un resumen del objeto query_TCGA, el cual es una lista
+#resultados <- getResults(query_TCGA)
+
+# Descargamos los datos
+#GDCdownload(query_TCGA)
+
+# Preparar los datos en un objeto SummarizedExperiment
+#BRCA_data <- GDCprepare(query_TCGA, summarizedExperiment = T)
+```
+
+De esta manera, hemos obtenido un objeto del tipo SummarizedExperiment, el cual es una clase de Bioconductor, diseñado para almacenar datos genómicos complejos, que contiene:
+
+-   Expresión de los genes en cada muestra. Típicamente, las filas son los genes y las columnas, las muestras.
+
+-   Enformación sobre los genes en las filas, como el nombre, IDs, ubicación en el cromosoma, etc.
+
+-   Información sobre las muestras en las columnas, como el ID del paciente e información clínica como la edad, género, estadio de tumor, etc.
+
+Se puede acceder a cada parte de la siguiente manera:
+
+```{r}
+# Acceder a la matriz de expresión (conteos)
+#counts_matrix <- assay(BRCA_data)
+
+# Acceder a la información de los genes como un dataframe
+#gene_info <- as.data.frame(rowData(BRCA_data))
+
+# Acceder a la información clínica y de las muestras como un dataframe
+#clinical_info <- as.data.frame(colData(BRCA_data))
+```
+
+Debido a la gran cantidad de datos a descargar, se va a proceder utilizando los datasets proporcionados para la actividad, previamente divididos en matriz de expresión y datos clínicos.
+
+### Nuestro caso
+
+```{r}
+library(readr)
+
+clinical_info <- read_tsv("clinical_info_TCGA-BRCA.tsv", show_col_types = FALSE,
+                        na=c("NA","","[Not Applicable]","[Not Available]","[Unknown]",
+                             "[Not Evaluated]","Indeterminate","[Discerpancy]"))
+
+brca_exp_mat <- read_tsv("BRCA_exp_matrix.tsv", show_col_types = FALSE,
+                          na=c("NA","","[Not Applicable]","[Not Available]","[Unknown]",
+                               "[Not Evaluated]","Indeterminate","[Discerpancy]"))
+
+# Convertirlos en data frames, que son mas manejables que el formato tibble
+brca_exp_mat <- as.data.frame(brca_exp_mat)
+clinical_info <- as.data.frame(clinical_info)
+```
+
+Al cargar los datos aparece un aviso que tendremos que arreglar más adelante.
+
+## Exploración del dataset
+
+Si trabajamos con los datos descargados, habría que utilizar el dataframe *gene_info* para construir la matriz de conteos únicamente con los genes que son codificantes, eliminar duplicados y utilizar el nombre del gen en lugar de su identificador *ensemble_id*, de manera que la visualización sea más representativa.
+
+Como vamos a usar los datasets que se ofrecen en la actividad, nos saltaremos el paso de crear la matriz de expresión a partir de los metadatos de los genes. Aún así, es imprescindible hacer un análisis exploratorio para comprobar que los datos (tanto la matriz de expresión como la matriz de datos clínicos) están listos para trabajar con ellos, es decir, que no haya duplicados, que tengan el mismo número de muestras, etc.
+
+```{r}
+## Exploracion del dataset
+dim(brca_exp_mat)
+dim(clinical_info)
+
+# Comprobar primeras filas y columnas
+head(brca_exp_mat[, 1:5]) # Primera columna es una muestra, hay que desplazar el dataset 
+#una columna a la derecha
+head(brca_exp_mat[, 1150:1155])
+
+head(clinical_info[, 1:5]) # Primera columna es una muestra, hay que desplazar el dataset 
+#una columna a la derecha
+
+# Comprobar duplicados 
+table(duplicated(colnames(brca_exp_mat)))
+table(duplicated(brca_exp_mat$gene_ID))
+# Comprobar valores NA en los nombres de las filas
+sum(is.na(brca_exp_mat[, 1]))
+```
+
+Aquí se observa un problema importante de resolver: la primera columna, la cual representa el nombre de los genes, tiene el nombre de una muestra, mientras que la última columna tiene los datos de expresión de dos muestras, lo cual tenemos que arreglar para no perder información. Ocurre lo mismo en *clinical_info*, donde todos los nombres de las columnas están desplazados hacia la izquierda y no corresponden con sus valores.
+
+### Arreglar data frame *brca_exp_mat*
+
+```{r}
+# Cargamos librerias
+library(tidyr) # para modificar la ultima columna
+library(stringr) # para eliminar el espacio que hay alrededor del \t
+
+# Guardar las columnas que tenemos
+current_colnames <- colnames(brca_exp_mat)
+# Definir la ultima columna para separar los valores
+last_col_name <- current_colnames[length(current_colnames)]
+# Limpiar el espacio en blanco alrededor del tabulador
+brca_exp_mat[[last_col_name]] <- str_trim(brca_exp_mat[[last_col_name]])
+brca_exp_mat[[last_col_name]] <- str_replace_all(brca_exp_mat[[last_col_name]], 
+                                                 "\\s*\t\\s*", "\t")
+# Separar la ultima columna en dos con nombres temporales
+brca_exp_mat <- brca_exp_mat %>%
+  separate_wider_delim(
+    cols = all_of(last_col_name),
+    delim = "\t",
+    names = c("second_to_last", "very_last"),
+    too_few = "align_start"
+  )
+
+# Desplazar las columnas hacia la derecha y nombrar a la columna 1 "gene_ID"
+old_names <- current_colnames[1:(length(current_colnames) - 2)]
+new_colnames <- c("gene_ID", old_names, 
+                  current_colnames[length(current_colnames) - 1],
+                  current_colnames[length(current_colnames)])
+
+colnames(brca_exp_mat) <- new_colnames
+
+brca_exp_mat <- as.data.frame(brca_exp_mat)
+
+# Establecer la columna de genes como el nombre de las filas
+rownames(brca_exp_mat) <- brca_exp_mat[, 1]
+brca_exp_mat <- brca_exp_mat[, -1]
+
+# Verificar
+dim(brca_exp_mat)
+head(colnames(brca_exp_mat))
+tail(colnames(brca_exp_mat))
+```
+
+### Arreglar data frame *clinical_info*
+
+En este caso, se van a desplazar los nombres de las columnas hacia la derecha y se va a eliminar la primera columna, la cual contiene valores numéricos que no son representativos de las muestras. Sin embargo, al eliminar la última columna, estamos perdiendo la información de *tumor_tissue_site*, la cual podría ser importante. Aún así, ante la imposibilidad de descargar los datos, es la única estrategia que veo posible.
+
+```{r}
+### Desplazar los nombres de las columnas hacia la derecha
+# Coger las n-1 columnas
+col_names_correct <- colnames(clinical_info)[1:(length(colnames(clinical_info))-1)]
+# Crear nombres nuevos: un marcador para la primera columna y el resto desplazados
+temporal_names <- c("delete", col_names_correct)
+# Asignar los nuevos nombres a las columnas
+colnames(clinical_info) <- temporal_names
+# Eliminar la primera columna
+clinical_info <- clinical_info[, -1]
+
+# Verificar
+head(clinical_info[, 1:5])
+head(clinical_info[, 110: 113])
+```
+
+Finalmente tenemos la matriz de expresión con todas las filas y columnas correctamente dispuestas, donde la primera columna es la columna de nombres de los genes. Proseguimos con el análisis exploratorio.
+
+```{r}
+# Comprobar si hay genes duplicados en la informacion clinica
+table(duplicated(clinical_info$sample))
+# Eliminamos los duplicados con el operador inverso ! y el vector logico de duplicados
+clinical_info_filtered <- clinical_info[!duplicated(clinical_info$sample),]
+
+# Comprobar que todas las muestras de clinical_info estén en brca_exp_mat y viceversa
+table(clinical_info_filtered$sample%in%colnames(brca_exp_mat))
+table(colnames(brca_exp_mat)%in%clinical_info_filtered$sample)
+
+# Ver las 17 muestras que sobran en clinical_info respecto a brca_exp_mat
+clinical_patients <- clinical_info_filtered$sample
+clinical_patients[!clinical_patients %in% colnames(brca_exp_mat)]
+
+# Eliminar las muestras sobrantes
+clinical_info_filtered <- clinical_info[clinical_info$sample %in% colnames(brca_exp_mat), ]
+
+# Comprobar que tienen la misma dimension y estan en el mismo orden
+all(colnames(brca_exp_mat)==clinical_info_filtered$sample)
+
+# Comprobar primeras filas y columnas
+head(brca_exp_mat[, 1:5])
+
+# Comprobamos las dimensiones de las matrices y sus clases
+dim(clinical_info_filtered) # Filas: muestras; columnas: variables clinicas
+class(clinical_info_filtered)
+
+dim(brca_exp_mat)
+class(brca_exp_mat)
+
+# Ver un resumen de ambos datasets
+summary(brca_exp_mat[, 1:5])
+summary(clinical_info_filtered[, 1:5])
+```
+
+Finalmente, tenemos la matriz de expresión génica y la información clínica de las pacientes filtrada, con unas dimensiones coherentes entre sí.
+
+Vemos que en la información clínica había 5 duplicados y 17 muestras más que no aparecían en la matriz de expresión génica, por lo que se han eliminado. Así, nos quedamos con dos data frames que contienen información de **1155 muestras:** por un lado, la **expresión de 20500 genes** y por otro, **114 columnas con la información de las variables clínicas e información de las muestras.**
+
+Sin embargo, para evitar errores futuros en la regresión lineal, vamos a comprobar cómo son los datos en la columna *er_status_by_ihc*, ya que los valores NA nos darán problema, ya que harán que la matriz de diseño no tenga la misma dimensión que la matriz de expresión. Además, vamos a corroborar que ningún paciente que tenga algún valor en esa columna, tenga también la variable *age_at_diagnosis* para poder hacer bien la regresión.
+
+```{r}
+# Ver quetipo de muestras hay
+table(clinical_info_filtered$er_status_by_ihc)
+# Ver cuantos valores NA hay
+sum(is.na(clinical_info_filtered$er_status_by_ihc))
+sum(is.na(clinical_info_filtered$age_at_diagnosis))
+```
+
+Como podemos ver, hay 983 muestras con las que vamos a poder trabajar, ya que hay 172 muestras de las que se desconoce el estatus del receptor de estrógenos. Por lo tanto, se van a eliminar esas muestras (filas) en el data frame de *clinical_info* y sus correspondientes (columnas) en la matriz de expresión, *brca_exp_mat*. De igual manera, se eliminarán las muestras de las que se desconozca la edad de diagnóstico.
+
+```{r}
+# Eliminar muestras que tengan tumor_status == NA
+clinical_info_clean <- clinical_info_filtered[!is.na(clinical_info_filtered$er_status_by_ihc), ]
+
+# Ver si quedan valores NA
+sum(is.na(clinical_info_clean$er_status_by_ihc))
+sum(is.na(clinical_info_clean$age_at_diagnosis))
+```
+
+Ahora, debemos eliminar las muestras correspondientes en la matriz de expresión.
+
+```{r}
+# Obtener el ID de las muestras en ambos datasets
+samples_exp <- colnames(brca_exp_mat)
+samples_clinic <- clinical_info_clean$sample
+
+# Buscar muestras presentes en ambos datasets
+common_samples <- intersect(samples_exp, samples_clinic)
+
+cat("Muestras de la matriz de expresión:", length(samples_exp), "\n")
+cat("Muestras de los datos clínicos:", length(samples_clinic), "\n")
+cat("Muestras comunes:", length(common_samples), "\n")
+
+# Crear subset de las muestras comunes
+brca_exp_clean <- brca_exp_mat[, common_samples]
+
+# Verificar que las dimensiones cuadran
+ncol(brca_exp_clean)
+nrow(clinical_info_clean)
+
+# Verificar que el orden es el mismo
+all(colnames(brca_exp_clean) == clinical_info_clean$sample)
+```
+
+Así, el número de muestras se ha reducido a **983**. Finalmente, comprobamos la distribución de las variables que nos interesan:
+
+```{r}
+table(clinical_info_clean$er_status_by_ihc)
+table(clinical_info_clean$age_at_diagnosis)
+```
+
+# Análisis de expresión diferencial
+
+Ya una vez se ha comprobado que las matrices con las que vamos a trabajar están bien ordenadas, debemos entrar en en análisis de expresión diferencial, donde se va a comparar la expresión de los genes de ambos grupos de muestras: muestras con receptor de estrógenos negativo, *ER-* (casos) vs. muestras con receptor de estrógenos positivo, *ER+* (control). Esta, **er_status_by_ihc** será nuestra **variable independiente**, ya que es la que estamos analizando.
+
+Por otro lado, tenemos la edad de diagnóstico, **age_at_diagnosis**, que será nuestra covariable, ya que es la variable de ajuste (o control) que incluimos para eliminar posibles variaciones de la edad sobre los resultados; no queremos ver qué genes cambian de expresión con la edad, queremos tener en cuenta la edad para ver cómo se expresan los genes en el estatus de ER.
+
+## Normalización
+
+Este paso es imprescindible para correir los valores de la cuantificación con el fin de reducir los sesgos técnicos y permitir determinar de forma más precisa los valores de expresión y diferencias biológicas relevantes.
+
+Aquí vamos a usar el paquete *edgeR* para normalizar, el cual está dentro del paquete *limma*. Este paquete utiliza un tipo específico de objeto llamado *DGEList*, el cual tenemos que crear utilizando la matriz de conteos que queremos normalizar.
+
+Tenemos que tener en cuenta que, dentro de los 20500 genes, habrán algunos que no se expresen, o que estén poco expresados, lo cual puede dar lugar a falsos positivos. Así, se va a llevar a cabo una normalización del tipo **Conteos por Millón (CPM)**, la cual consiste en normalizar los valores de conteo por el número total de lecturas secuenciadas, calculadas en millones de lecturas.
+
+Para elegir el umbral de la expresión mínima de un gen, vamos a tener en cuenta el tamaño del grupo más pequeño, observando la variable *er_status_by_ihc*, que ya vimos anteriormente que la clase *NEGATIVE* tenía **224 muestras.** Por lo tanto, estableceremos que un gen tiene que estar expresado en, al menos, 224 muestras para ser tenido en cuenta. Además, cada expresión representará 1 millón de lecturas (*cpm = 1*).
+
+```{r}
+### Normalizacion: Limpiar conteo quitando genes poco expresados
+# Convertimos el data frame en una matriz
+exp_matrix <- as.matrix(brca_exp_clean)
+class(exp_matrix) <- "numeric" # Forzar a que la clase sea numerica para poder crear la 
+#matriz de expresion
+
+# Creamos una matriz de expresión
+de.exp <- DGEList(counts=exp_matrix) # Este objeto espera una matriz. 
+
+# Nos quedamos con genes que estén expresados en, al menos, 19 muestras
+keep.exprs <- rowSums(cpm(de.exp)>1)>=224 # Vector booleano
+# Vemos cuantos genes estan poco expresados
+table(keep.exprs)
+
+# Creamos un subset de las filas (genes) que tienen expresion en mas de 19 muestras
+de.exp <- de.exp[keep.exprs,] # Objeto DGEList
+# Vemos cuantos genes quedan despues de la filtracion
+dim(de.exp)
+```
+
+Al calcular la dimensión de *de.exp* vemos que 5533 genes no están expresados en, como mínimo, 224 muestras, por lo que han sido eliminados. Así, hemos normalizado los valores de conteo por el número total de lecturas secuenciadas.
+
+Entonces, utilizando únicamente los genes bien expresados, vamos a normalizar los valores de cuantificación en función del tamaño de la librería, para lo cual usaremos el algoritmo TMM (*Trimmed Mean of M-Values*).
+
+```{r}
+# Normalizacion TMM
+limma <- calcNormFactors(de.exp, method = "TMM")
+# Extraemos la matriz de conteos normalizada
+tmmexp <- cpm(limma, log = T, prior.count = 3) # counts*1000000/(libs.size*fact)
+# Hacemos un histograma de la expresion de los genes normalizados
+hist(tmmexp, 1000, main = paste("Histograma de la matriz de conteos normalizada "))
+```
+
+Este histograma, representados con una transformación logarítmica para que se visualicen bien todos los genes, ya que, como se observa, hay una gran cantidad de genes con poca expresión, mientras que los genes que están más representados tienen una frecuencia menor.
+
+A continuación, vamos a comparar los datos no normalizados frente a los normalizados mediante un diagrama de cajas, de manera que se pueda ver la diferencia en la variabilidad de la expresión de los genes. Para ello, se va a crear un subset de 15 muestras.
+
+```{r}
+# Graficar siempre las mismas 15 muestras
+set.seed(8)
+samples_indices = sample(1:ncol(de.exp), 15)
+
+# Crear matriz de conteos sin normalizar
+no_tmmexp<-cpm(de.exp,log = T,prior.count = 3)
+
+# Crear subsets de 15 muestras
+no_tmmexp_subset <- no_tmmexp[, samples_indices]
+tmmexp_subset <- tmmexp[, samples_indices]
+
+# Boxplot de datos no normalizados vs. normalizados
+par(mfrow=c(1,2), oma = c(0, 0, 2, 0)) # oma añade margen externo 
+boxplot(no_tmmexp_subset, las=2,  main="")
+title(main="A. Datos crudos",ylab="Log-cpm")
+boxplot(tmmexp_subset, las=2,  main="")
+title(main="B. Datos normalizados",ylab="Log-cpm")
+mtext("Efecto de la normalización TMM sobre 15 muestras aleatorias", 
+      side = 3, line = 0, outer = TRUE, cex = 1.3, font = 2) # Añade titulo principal
+par(mfrow=c(1,1))
+```
+
+Se puede observar que hay mucha más variabilidad en la figura A, siendo, por lo tanto, menos interpretable. A su vez, el diagrama de cajas de la figura B con los datos normalizados, tiene una mediana mucho más homogénea, de manera que es mucho más potente estadísticamente.
+
+## Exploración de los datos normalizados
+
+A continuación, una práctica imprescindible es hacer un PCA (*Principal Component Analysis*) sobre los datos normalizados, lo que nos muestra la variabilidad entre las muestras usando sólo los datos de expresión en dos dimensiones. Así podemos detectar rápidamente si las muestras se dividen de manera clara entre muestras de ER- y muestras de ER+.
+
+Este análisis nos da una primera vista clara de cómo se van a comportar las muestras y de cuales deben ser nuestros próximos pasos.
+
+Es importante destacar que este PCA espera el nombre de los genes en las columnas, por lo que si queremos ver la expresión diferencial de las muestras, debemos hacer la traspuesta. Además, antes de hacer la gráfica, es importante descomponer la variabilidad de los datos en el porcentaje de importancia de cada uno de los componentes que explican dicha variabilidad en los datos. Esto se hace con la desviación estándar de los distintos componentes.
+
+Finalmente, haremos una gráfica con los dos componentes principales, es decir, los que más aportan a la variabilidad de las muestras.
+
+```{r}
+# PCA despues de normalizacion
+pca_results <- prcomp(t(tmmexp), scale. = TRUE)
+
+# Calcular varianza explicada
+var_explained <- pca_results$sdev^2 / sum(pca_results$sdev^2) * 100
+
+# Preparar datos para ggplot
+pca_data <- data.frame(
+  PC1 = pca_results$x[,1],
+  PC2 = pca_results$x[,2],
+  sample = rownames(pca_results$x)
+)
+
+# Añadir metadatos clínicos
+pca_data <- merge(pca_data, clinical_info_filtered[,c("sample", "tumor_status", "gender", 
+                                                      "age_at_diagnosis", "bcr_patient_barcode", "er_status_by_ihc")], 
+                  by.x = "sample", by.y = "sample")
+
+# Gráfico PCA
+pca_plot <- ggplot(pca_data, aes(x = PC1, y = PC2, color = er_status_by_ihc)) +
+  geom_point(size = 3, alpha = 0.8) +
+  labs(title = "PCA - ER+ vs ER-",
+       x = paste0("PC1 (", round(var_explained[1], 2), "%)"),
+       y = paste0("PC2 (", round(var_explained[2], 2), "%)"),
+       color = "Tipo de muestra") +
+  theme_bw() +
+  theme(legend.position = "right")
+
+# Mostrar grafico
+print(pca_plot)
+```
+
+Podemos ver que hay cierta diferenciación entre genes que dan positivo en receptor de estrógenos y aquellos que dan negativo. Esto es buena señal.
+
+## Expresión diferencial de los genes
+
+Vamos a continuar, con el análisis con *limma* para ver la expresión diferencial de los genes.
+
+Para empezar, tenemos que crear una matriz con la información de las muestras en binario (0 para muestras tumorales, 1 para muestras normales). Esta será la matriz de diseño (también conocida como matriz de contrastes).
+
+```{r}
+# Crear matriz de diseño
+design <- model.matrix(~0+clinical_info_clean$er_status_by_ihc + 
+                         clinical_info_clean$age_at_diagnosis)
+
+# Limpiar los nombres de las columnas
+colnames(design) <- gsub("clinical_info_clean$er_status_by_ihc", "",
+                         colnames(design), fixed = T) 
+colnames(design) <- gsub("clinical_info_clean$age_at_diagnosis", "age",
+                         colnames(design), fixed = T)
+```
+
+Haciendo esto, ya tenemos los dos objetos que necesita limma para hacer la transformación de los datos con *voom* y la **regresión lineal:** el objeto DGEList *limma* y la matriz de diseño *design*.
+
+Como limma fue creado para el análisis de microarrays, la función voom espera datos contínuos para la transformación. Sin embargo, estamos trabajando con la expresión de los genes mediante conteos, por lo que son variables discretas. Por ello, le vamos a pedir que represente en el diagrama los valores de expresión de cada gen en función de su varianza.
+
+```{r}
+# Hacemos la gráfica de voom
+fit <- voom(limma, design, plot = T) 
+# Regresión lineal con la expresión de los datos y su varianza
+fit <- lmFit(fit, design)
+```
+
+Se puede observar que los genes que tienen una menor expresión (más hacia la izquierda) tienen una mayor varianza (más hacia arriba), lo cual es lo esperable. Además, la transformación ha funcionado bien, pues la línea roja se adapta bien a la distribución, por lo que podemos proceder con la regresión lineal.
+
+A continuación, haremos un contraste donde se compararán todas las muestras que tengan tejido tumoral frente a las que tienen tejido normal (en este sentido, para que los valores de Fold Change queden en positivo).
+
+```{r}
+# Contrastes
+# Comparacion de tumores vs tejido normal
+cont.wt <- makeContrasts(er_p_vs_n=Negative - Positive,  levels=design)
+# Hacemos la regresion lineal con los contrastes
+fit2 <- contrasts.fit(fit, cont.wt)
+```
+
+Finalmente, hacemos una inferencia bayesiana para obtener información más homogénea a lo largo de todas las muestras, infiriendo la varianza de cada uno de los genes. Funciona muy bien cuando tenemos pocas muestras.
+
+```{r}
+# Aproximacion bayesiana
+fit2 <- eBayes(fit2)
+plotSA(fit2)
+```
+
+Obtenemos un gráfico con los valores de las varianzas transformados, de manera que tenemos una varianza homogénea a lo largo de toda la distribución, independientemente de la expresión de los genes.
+
+Una vez completado este análisis, debemos obtener una tabla con los genes que están diferencialmente expresados obtenida de la función Bayes.
+
+```{r}
+# Obtener tabla de genes diferencialmente expresados
+de_res<-topTable(fit2,coef = "er_p_vs_n",number = Inf) #inf para que devuelva todos los genes
+table(de_res$adj.P.Val<0.05)
+```
+
+Se debe tener en cuenta el p-valor ajustado, ya que se resuelve la significancia aleatoria que pueda obtener un gen debido a gran cantidad de muestras sobre las que se calcula el p-valor. Así, obtenemos que **11987 genes están diferencialmente expresados**. Este número puede parecer muy alto (representa el 58% de la cantidad total de genes), sin embargo, puede tener sentido ya que el estatus de receptor de estrógenos deriva a subtipos de cancer diferentes, debido a distintas rutas metabólicas, distintos programas celulares o, incluso, distintas redes regulatorias de genes.
+
+Aún así, podemos filtrar más, añadiendo el logaritmo del Fold Change, *logFC*, que representa la proporción de aumento que se produce en la expresión; se suele poner en base 2. En este caso, representará que las muestras de receptor de estrógenos negativa, *ER-* están doblemente expresadas sobre las de *ER+*.
+
+```{r}
+table(de_res$adj.P.Val<0.05 & abs(de_res$logFC)>1)
+```
+
+Vemos que sólo 1932 genes cumplen ambas condiciones, por lo que 13035 genes no serán significantes. Vamos a hacer una gráfica de volcán, o *volcanoplot*, donde se verá la significancia de la expresión de los genes diferenciados, es decir, los genes *upregulados* y *downregulados*.
+
+```{r}
+### Volcano plot
+# Si se cumplen ambas condiciones, será significante. Si ademas se cumple que logFC > 0, 
+#sera upregulated. 
+de_res$Significance <- ifelse(de_res$adj.P.Val < 0.5 & abs(de_res$logFC) > 1,
+                              ifelse(de_res$logFC > 0, "Upregulated", "Downregulated"), 
+                              "Not Significant") 
+
+# Guardamos el nombre de los genes en una nueva columna
+de_res$ID<-rownames(de_res)
+
+# Ordenar los datos por significancia (adj.P.Val) para seleccionar el top 10
+top_genes <- de_res[order(de_res$adj.P.Val), ][1:10, ]
+
+#Definimos los parametros del grafico
+volcano_plot <- ggplot(de_res, aes(x = logFC, y = -log10(adj.P.Val), color = Significance)) +
+  geom_point(alpha = 0.8, size = 2) +  # Puntos del gráfico
+  scale_color_manual(values = c("Upregulated" = "red", "Downregulated" = "blue", 
+                                "Not Significant" = "grey")) +
+  theme_minimal() +  # Tema limpio
+  labs(title = "Volcano Plot", 
+       x = "Log2 Fold Change", 
+       y = "-log10 Adjusted P-Value") +
+  # Líneas de FC
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black", alpha = 0.7) +  
+  # Línea de p-valor
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black", alpha = 0.7) +  
+  theme(legend.position = "top") +
+  geom_text_repel(data = top_genes, aes(label = ID), 
+                  size = 3, col="black",
+                  box.padding = 0.3, 
+                  point.padding = 0.2, 
+                  max.overlaps = Inf) 
+
+#Pintamos el plot
+volcano_plot
+```
+
+Aquí vemos el Fold Change en el valor de la x y el p-valor ajustado en el eje y, con los genes upregulados (a la izquierda en azul), lo que significa que dichos genes están más expresados significativamente en muestras con ER+ que en muestras con ER-, mientras los genes downregulados (a la derecha en rojo), están más expresados significativamente en todas las muestras con ER+.
+
+Más adelante, en el análisis funcional, se verán más en detalle la expresión de algunos genes y la función que tienen.
+
+Finalmente en este primer análisis, vamos a hacer un heatmap, que es básicamente una matriz de conteo con los datos normalizados para los 10 genes más importantes de ambos tipos, upregulados y downregulados.
+
+```{r}
+### heatmap
+# Seleccionar los 10 genes más upregulados y los 10 genes más downregulados
+top_upregulated <- de_res[de_res$Significance == "Upregulated", ]
+top_upregulated <- top_upregulated[order(-top_upregulated$logFC), ][1:10, ]
+
+top_downregulated <- de_res[de_res$Significance == "Downregulated", ]
+top_downregulated <- top_downregulated[order(top_downregulated$logFC), ][1:10, ]
+
+# Combinar los 20 genes seleccionados 
+top_genes <- rbind(top_upregulated, top_downregulated)
+
+# Extraer la matriz de expresión para estos genes
+heatmap_data <- tmmexp[rownames(tmmexp) %in% top_genes$ID, ]
+
+# Escalar los datos por filas (genes) para mejor visualización
+scaled_data <- t(scale(t(heatmap_data)))  # Escalado por fila
+
+# Crear el heatmap
+pheatmap(scaled_data,
+         color = colorRampPalette(c("blue", "white", "red"))(50),  # Escala de colores
+         cluster_rows = TRUE,  # Agrupar genes
+         cluster_cols = TRUE,  # Agrupar muestras
+         show_rownames = TRUE,  # Mostrar nombres de genes
+         show_colnames = TRUE,  # Mostrar nombres de muestras
+         fontsize_row = 8,  # Tamaño de la fuente para los nombres de los genes
+         fontsize_col = 10,  # Tamaño de la fuente para los nombres de las muestras
+         main = "Heatmap del Top 20 de Genes Up- y Downregulados")  # Título del heatmap
+```
+
+Se puede ver que hay una gran acumulación de genes upregulados para muestras que tienen ER+ en la parte alta a la derecha (en azul), mientras que las muestras que están más downreguladas (en rojo) se encuentran clusterizadas también.
+
+En la tabla *top_genes* encontramos que el **gen que está mejor diferencialmente expresado es el ESR1**, lo cual es una muy buena señal, ya que este es el gen de receptor de estrógenos 1, el cual es el gen que codifica la proteína de receptores de estrógenos, lo cual tiene una alta implicación biológica.
+
+# Análisis de enriquecimiento funcional
+
+## Similitud semántica (Gene Ontology)
+
+En este análisis, deberemos inferir la función de los genes, anotando de manera similar los genes que tienen una función similar, lo que se conoce como **similitud semánntica**. Es decir, la información disponible en unos genes nos sirve para inferir la información faltante de otros.
+
+Así, haremos una **matriz de similitud** de los 20 genes asociados que hemos obtenido previamente.
+
+En primer lugar, utilizaremos la base de datos **Gene Ontology (GO)**, la cual recoge la función de las proteínas en los organismos con un vocabulario preciso y dinámico, aunque sin asociación a una enfermedad.
+
+Para hacer esto, hay varias aproximaciones. Aquí vamos a usar el método de **DAGs** *(Directed Acyclic Graph)*, el cual utiliza grafos dirigidos que no tiene ciclos para calcular la similitud entre dos términos mediante su localización en el grafo y las relaciones con los términos ancestros. Así, se utilizará el método *Wang*, y como estamos comparando múltiples términos semánticos, lo combinaremos con *Best-Match Average (BMA)*, el cual computa la media de todos los valores de similitud máximos para cada fila y columna.
+
+```{r}
+# Llamamos al archivo de la base de datos GO, donde Hs es Homo Sapiens
+# utilizando la ontologia molecular function
+hsGO <- godata('org.Hs.eg.db', keytype = "SYMBOL", ont = "MF", computeIC=FALSE)
+# Creamos la lista de genes con la que trabajar
+genes <- rownames(top_genes)
+# Calcular la matriz de similitud con el metodo Wang combinado con BMA
+mgeneSim(genes, semData = hsGO, measure = "Wang", combine = "BMA", verbose=FALSE)
+```
+
+La dimensión máxima de esta matriz de similitud aquí en la interfaz es de 15, por lo que no podemos ver la similitud semántica de los 20 genes. Vemos que la mayoría de genes no están muy relacionados. Sin embargo, podemos ver un caso interesante como es el del gen TFF1 o TFF2, ambos reguladores clásicos de ER, los cuales tienen una correlación semántica de 1 con muchos otros genes, lo cual puede estar indicando algún problema en la calidad de los datos o en el procesamiento. Por otro lado, el gen estrella del receptor de estrógenos, ESR1, tiene una correlación media con la mayoría de genes ER-regulados, lo cual puede ser esperado, porque aunque regula otros genes, no están co-expresados al mismo nivel.
+
+Vamos a comparar directamente el grupo de genes upregulados con el grupo de genes downregulados, para ver qué correlación tienen.
+
+```{r}
+# Medir la correlación de los 10 genes upregulados con los 10 genes downregulados
+gs1 <- rownames(top_upregulated)
+gs2 <- rownames(top_downregulated)
+GOSemSim::clusterSim(
+  gs1, gs2, semData = hsGO, measure = "Wang", combine = "BMA")
+```
+
+Ambos grupos tienen una correlación media, lo cual tiene sentido, pues unos activan a otros, mientras que otros inhiben a algunos otros. Debemos ir más allá para entender estas correlaciones.
+
+Por lo tanto, utilizando la base de datos Gene Ontology, se procederá a hacer el análisis de enriquecimiento funcional.
+
+## Análisis de Enriquecimiento del set de Genes (GSEA)
+
+Este primer análisis de enriquecimiento funcional nos permitirá introducir la información resultante del análisis de expresión diferencial anterior. Es robusto estadísticamente, ya que utiliza todos los genes significativos que hemos obtenido en el anterior análisis, considerando la magnitud de cambios de expresión (*logFC*).
+
+Se divide en 3 pasos clave: - Cálculo de un score de enriquecimiento (ES), mediante el parámetro de Kolmogorov-Sirnov (KS) enriquecido. - Estimación del nivel de significación del parámetro de puntuación calculado, mediante un p-valor test de permutaciones. - Finalmente, se hace una corrección por múltiples comparaciones (FDR) para evitar resultados significativos por azar.
+
+Es muy importante tener en cuenta varias cosas. Para empezar, las funciones esperan un vector ordenado de manera descendente por el Fold Change, es decir, los genes más arriba serán los que están más upregulados y los que estén más abajo en la lista, serán los que están más downregulados. Por lo tanto, tenemos que modificar nuestro set de genes, que ahora mismo es un data frame. Además, la anotación GO en *OrgDb* está indexada por ENTREZID. Como aquí tenemos una lista de genes que hemos obtenido nosotros, tenemos que adaptarlo.
+
+Por lo tanto, teniendo en cuenta que nuestro **universo de genes son los 14967 genes diferencialmente expresados**, contenidos en el objeto *de_res*, y nuestra **lista de genes serán los 1932 genes significativos**, objeto que vamos a crear ahora.
+
+```{r}
+# Guardamos la lista de genes significativos
+signif_genes_df <- de_res[de_res$Significance == "Downregulated" | de_res$Significance == "Upregulated", ]
+# Lo convertimos en vector
+signif_genes <- sign(signif_genes_df$logFC) * (-log10(signif_genes_df$P.Value))
+# Le damos nombre a los genes
+names(signif_genes) <- rownames(signif_genes_df)
+# Ordenar en orden descendente
+signif_genes <- sort(signif_genes, decreasing = TRUE)
+# Comprobar el objeto
+str(signif_genes)
+```
+
+A continuación, se va a calcular sobre este vector de genes bien catalogado el enriquecimiento, para lo cual se va a utilizar la ontología de **procesos biológicos (BP)**, pues es la que más interés biológico tiene, ya que los tumores ER+ y ER- difieren en procesos como factores de crecimiento en la activación de vías metabólicas, redes neuronales de respuesta a estrógenos o en la proliferación de firmas hormonales; todos procesos biológicos, no actividades moleculares ni localizaciones celulares.
+
+Aquí no tenemos que tener en cuenta el universo de genes.
+
+```{r}
+# Analisis de enriquecimiento de genes
+ego <- gseGO(geneList = signif_genes,
+              OrgDb = org.Hs.eg.db,
+              ont = "BP", # Biological Process
+              keyType = "SYMBOL",
+              minGSSize = 50, # minimo 50 genes asociados para el termino
+              maxGSSize = 300, # maximo 300 genes asociados para el termino
+              pvalueCutoff = 0.05,
+              eps = 0,
+              verbose = FALSE)
+# min: valor minimo de genes con los que trabajo. idem max
+head(ego, 3)
+dim(ego)
+```
+
+Por lo tanto, mediante este análisis de enriquecimiento, vemos que la función que los genes significativos que hemos obtenido se dan en 3 procesos biológicos clave: la división nuclear (59 genes asociados), la organización del cromosoma (51 genes asociados) y el proceso del ciclo celular mitótico (82 genes asociados), todos con una significancia muy alta, lo que indica que dichos términos están muy enriquecidos por los genes asociados. Además, todos **forman una vía metabólica**, lo cual aporta consistencia biológica.
+
+Hacemos ahora una representación visual de esta red de términos asociados.
+
+```{r}
+goplot(ego)
+```
+
+Cuanto más rojo el término, más significativo es en el proceso biológico en cuestión. Vemos que los genes significativos para el receptor de estrógenos están altamente asociados con procesos celulares, desde la mitosis (reparto del material genético a dos células hijas) hasta el mismo ciclo celular y la división celular. Además, estos genes están también involucrados en la división nuclear, la organización de los cromosomas y de los orgánulos, como se puede ver en la otra rama.
+
+Ambas ramas tienen como término ancestro común los procesos celulares, pero no es significante, al igual que la biogénesis.
+
+### Base de datos KEGG
+
+Para ver las rutas metabólicas con mejor claridad, vamos a graficar estos términos utilizando la base de datos KEGG (Kyoto Encyclopedia of Genes and Genomes). En este caso, debemos convertir previamente los nombres de los genes en ENTREZ IDs.
+
+```{r}
+# Añadir ENTREZ IDs a los datos
+id_conversion <- bitr(
+  geneID = signif_genes_df$ID,
+  fromType = "SYMBOL",
+  toType = "ENTREZID",
+  OrgDb = org.Hs.eg.db
+)
+# Fusionar con los datos originales
+genes_entrez <- merge(signif_genes_df, id_conversion, 
+                          by.x = "ID", by.y = "SYMBOL", all.x = FALSE)
+
+# Comprobar en cuantos genes ha funcionado la conversion
+cat("Exito de la conversion:", nrow(genes_entrez)/nrow(signif_genes_df)*100, "%\n")
+
+# Lo convertimos en un vector
+genes_entrez_vec <- sign(genes_entrez$logFC) * (-log10(genes_entrez$P.Value))
+# Le damos nombre a los genes
+names(genes_entrez_vec) <- rownames(genes_entrez)
+# Ordenar en orden descendente
+genes_entrez_vec <- sort(genes_entrez_vec, decreasing = TRUE)
+# Comprobar el objeto
+str(genes_entrez_vec)
+```
+
+Ahora que tenemos el ENTREZ ID de los datos, podemos usar la base de datos KEGG.
+
+```{r}
+# GSEA - KEGG vias metabolicas
+kegg1 <- gseKEGG(geneList = genes_entrez_vec, 
+                 organism = "hsa",
+                 keyType = "kegg",
+                 minGSSize = 10,
+                 maxGSSize = 300,
+                 pvalueCutoff = 0.05,
+                 pAdjustMethod = "BH")
+
+head(kegg1, 3)
+```
+
+No sale ninguna vía metabólica asociada a las funciones de los genes significativos, debe de ser debido a algún error técnico no detectado.
+
+## Análisis de sobrerrepresentación (ORA)
+
+De manera complementaria, se comprobará la sobrerrepresentación de una lista de genes de una distribución en la que todos tienen anotación, para lo que se calcula el p-valor de que un término esté enriquecido, pero más adelante se tendrá que corregir.
+
+En este caso, no tenemos que convertir el objeto en un vector, pero tenemos que definir el universo de genes y el método para ajustar el p-valor: usaremos fdr.
+
+En este caso, necesitamos un vector con únicamente los nombres de los genes significativos, sin ningún orden concreto.
+
+```{r}
+# Creación del vector de carácteres
+signif_genes_names <- names(signif_genes)
+
+# Enriquecimiento en GO, utilizando el método FDR
+ego2 <- enrichGO(gene = signif_genes_names,
+                universe = rownames(de_res),
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                keyType = "SYMBOL",
+                pAdjustMethod = "BH", # Benjamin-Hochberg
+                pvalueCutoff = 0.001, # Reducir el numero de genes asociados
+                qvalueCutoff = 0.01,
+                readable = TRUE)
+head(ego2, 3)
+dim(ego2)
+```
+
+En este caso, vemos que los procesos biológicos más importantes en los que tienen función los genes significativos para ER en cáncer de mama son estos 3: regulación de los niveles hormonales, desarrollo de la epidermis y la respuesta humoral antimicrobiana.
+
+La columna GeneRatio muestra la cantidad de genes que están expresados en la proteína que actúa en dicha función dentro de los genes significativos, mientras que la columna BgRatio muestra lo mismo pero en todo el universo. Son estos dos ratios los que se van a comparar para ver si la función está sobrerepresentada o no, lo cual se mira con el el p-valor ajustado. Las tres funciones tienen un p-valor significativo, lo que nos indica que están muy sobrerrepresentadas en el set de genes significativos, donde el primer proceso biológico, **regulación de niveles de hormonas,** es el que está más sobrerrepresentado, lo cual tiene una alta implicación biológica.
+
+Vamos a verlo visualmente.
+
+```{r}
+goplot(ego2, max.overlaps = Inf)
+```
+
+En este caso, aparecen muchos términos en color gris, lo que significa que hay una gran cantidad de genes de la lista que no están anotados en ninguno de esos términos GO significante, de manera que las vías metabólicas no están enriquecidas con el set de genes con el que trabajamos. Esto es normal y esperado, ya que este análisis de sobrerrepresentación sólo destaca genes que conducen a un enriquecimiento significante, de manera que dichos genes serán "silenciosos" para esos procesos concretos.
+
+### Base de datos KEGG
+
+Vamos a comprobar qué ocurre con la base de datos KEGG.
+
+```{r}
+# ORA - KEGG vias metabolicas
+kegg2 <- enrichKEGG(gene = genes_entrez$ENTREZID, 
+                 organism = "hsa",
+                 minGSSize = 50,
+                 maxGSSize = 300,
+                 pvalueCutoff = 0.05,
+                 pAdjustMethod = "BH")
+
+head(kegg2)
+
+dev.new()
+dotplot(kegg2, showCategory=12) + ggtitle("KEGG Pathways ORA")
+```
+
+Hay algunos términos que están estrictamente relacionados con las vías metabólicas sobreenriquecidas por tumores de ER+, como son las **señales de transducción de estrógenos**, el cual es la vía metabólica que define tumores de mama con ER+; y las **señales de transducción de PPAR**, el cual es un marcador de cancer de mama luminal con ER+, pues PPAR está altamente expresado en tumores ER+. Otros términos están relacionados de manera indirecta por su relación hormonal, como la **síntesis y secreción de la aldosterona** o la **síntesis y secreción del cortisol**, los cuales son vías metabólicas de la hormona esteroide (y glucocorticoide en el segundo caso) que comparte mecanismos regulatorios con los estrógenos; y la señalización de la oxitocina, que es una vía metabólica de la hormona reproductiva expresada en el tejido mamario.
+
+Para obtener más información de estos términos, vamos a realizar un cnetplot de esto.
+
+```{r}
+kegg2R <- setReadable(kegg2, "org.Hs.eg.db", "ENTREZID")
+cnetplot(kegg2R, showCategory = 10)
+```
+
+Esto nos muestra 4 módulos funcionales principales que disferencian ER+ y ER- en el cáncer de mama:
+
+- **Cluster 1 (a la derecha, el más grande): señalización de estrógenos y respuesta hormonal.** Se ven genes importantes como ERS1 o TFF1. Es el núcleo de la firma de los tumores con ER+.
+
+- **Cluster 2 (arriba en el medio): metabolismo de lípidos y señalización de PPAR.** Acumula genes importantes para estos mecanismos como PPAR o ácidos grasos (FABP5, FABP7). Representa el fenotipo lipogénico y metabólico del cancer de mama luminal con ER+.
+
+- **Cluster 3 (arriba a la izquierda): señalización inmune e inflamatoria.** Aparecen citoquinas y quimioquinas esenciales como la familia de las CCL o las CXCL. Estas representan diferencias en los microentornos inmunes entre tumores de ER+ y ER-.
+
+-**Custer 4 (abajo a la derecha): transporte de iones y homeostasis.** Transportadores como la familia de las SLC e iones ATPasas de Na+ y K+, entre otras. Representan funciones que apoyan al metabolismo, como el transporte de nutrientes o la homeostasis iónica.
+
+Este gráfico es muy importante, mostrando una caracterización a múltiples niveles moleculares que demuestra que el estatus de ERno sólo define la respuesta hormonal, sino también el metabolismo fundamental y las propiedades de los tumores inmunológicos. 
+
+
+# Conclusiones
+
+Se obtienen interesantes conclusiones de este análisis de expresión diferencial y de enriquecimiento funcional. Para empezar, obtuvimos que el gen ESR1 es el que más diferencialmente expresado está, además de ser el más significativo, como se puede ver en el volcanoplot, lo cual es un hallazgo muy importante, pues es el gen que se expresa en la proteína encargada de la regulación de estrógenos. Sin embargo, se ven algunos resultados un tanto inquietantes, como la similitud de 1 que tienen genes como TFF1 o TFF3 con la mayoría, lo cual, al ser casos tan puntuales, puede estar indicando algún error técnico en los valores de expresión de dichos genes.
+
+Por otro lado, en el estudio de los procesos biológicos a los que están asociados estos genes, se obtienen resultados con altas implicaciones biológicas con la base de datos GO. Tristemente, no se pudieron comparar los resultados con la base de datos KEGG por problemas técnicos. El análisis de enriquecimiento muestra procesos biolígocos con una alta significancia que, además, forman una vía metabólica altamente asociada a los procesos de división celular, nuclear y transmisión de la información genética, lo que tiene una gran importancia en la proliferación del cáncer. En particular, las células cancerígenas con **ER+** de cáncer de mama son un subtipo clínico que muestra una **menor proliferación** que los tumores ER-, por lo que la división celular y la mitosis son procesos altamente enriquecidos en muestras con ER-.
+
+Por último, los resultados de ORA muestran un **patrón biológicamente coherente** para cáncer de mama con ER+, especialmente por la **regulación de hormonas**, ya que los tumores de ER+ mantienen la respuesta hormonal luminal, lo que implica que si se pierde la regulación de la pédida de hormonas, habrá una transición a un estado de tipo basal. Los hallazgos de términos como *desarrollo de la epidermis* o *respuesta humoral antimicrobiana* son un poco más inesperados, aunque pueden estar relacionados, en el primer caso, por la supresión de la diferenciación basal/epidermal en tumores ER+, lo cual es un marcador de la identidad luminal; y en el segundo, debido al microentorno inmune al frío de los tumores ER+ frente a los tumores ER-, que son inmunes al calor.
+
+En general, los resultados obtenidos son biológicamente coherentes y con un potencial clínico muy grande, pudiendo describir un **fenotipo del tumor ER+ de cáncer de mama:**
+
+*Las células luminales epiteliales mantienen la respuesta hormonal, se suprimen los programas de diferenciación basal y residen en un microentorno inmune al frío.*
+
+Esto se alinea perfectamente con los subtipos Luminal A/B de PAM50, que además queda bien interpretado mediante el cnet plot, donde la relevancia clínica y biológica adquieren gran valor.
+
+```{r}
+sessionInfo()
+```
+
+# Bibliografía
+
+1.  *Creighton et al., Breast Cancer Res (2009): ER+ tumors show luminal differentiation signatures; ER− show proliferation signatures*
+
+2.  *The Cancer Genome Atlas Network, Nature (2012): Basal-like tumors enriched in cell cycle pathways; Luminal tumors enriched in hormone response*
+
+3.  *Sørlie et al., PNAS (2001): Original molecular subtypes – Luminal A (low proliferation) vs. Basal-like (high proliferation)*
+
+4. *Perou CM, Sørlie T, Eisen MB, et al. (2000). Molecular portraits of human breast tumours. Nature*
+
+5. *Heldring N, Pike A, Andersson S, et al. (2007). Estrogen receptors: how do they signal and what are their targets. Physiol Rev*
+
+6.  [*https://yulab-smu.top/biomedical-knowledge-mining-book/021-go.html#go-gene-set-enrichment-analysis*](https://yulab-smu.top/biomedical-knowledge-mining-book/021-go.html#go-gene-set-enrichment-analysis){.uri}
+
+7.  [*https://www.ub.edu/nurcamein/es/receptores-nucleares/er-receptor-de-estrogenos/*](https://www.ub.edu/nurcamein/es/receptores-nucleares/er-receptor-de-estrogenos/){.uri}
+
+# Declaración de uso de IA
+
+-   Comprensión y correcto procedimiento para la descarga de los datos de GDC.
+
+-   Comprensión y corrección de errores de código a lo largo de todo el script.
+
+-   Resolución del problema de la columna 1 con el nombre de una muestra y la última columna con dos valores. Esto me tomó más tiempo de lo que pensaba.
+
+-   Comprensión de conceptos estadísticos y biológicos para el correcto desarrollo del análisis.
+
+-   Ayuda para la discusión final
