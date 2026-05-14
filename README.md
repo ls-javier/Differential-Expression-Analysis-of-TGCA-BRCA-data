@@ -1,6 +1,7 @@
 # Activity 3: Functional Differential Expression Analysis
 
 Author: **Javier Luque Serrano**
+Institution: **European University of Madrid**
 
 ## Description
 
@@ -56,6 +57,7 @@ This work is part of the Master's in Bioinformatics academic training and is sha
 # Actividad 3: Análisis de expresión diferencial funcional
 
 Autor: **Javier Luque Serrano**
+Institución: **Universidad Europea de Madrid**
 
 ## Descripción
 
