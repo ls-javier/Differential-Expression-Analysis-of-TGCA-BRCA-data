@@ -7,8 +7,6 @@ p_values.tsv
 
 # R temporary files
 .Rhistory
-.RData
-last_image.RData
 
 # PDFs (if not needed in repo)
 *.pdf
