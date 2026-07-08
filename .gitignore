@@ -4,6 +4,7 @@ BRCA_exp_matrix.tsv
 clinical_info_TCGA-BRCA.tsv
 nationwidechildrens.org_clinical_patient_brca.txt
 p_values.tsv
+.RData
 
 # R temporary files
 .Rhistory
